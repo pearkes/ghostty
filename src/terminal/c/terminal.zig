@@ -162,6 +162,7 @@ const Effects = struct {
     xtversion: ?XtversionFn = null,
     title_changed: ?TitleChangedFn = null,
     pwd_changed: ?PwdChangedFn = null,
+    mode_changed: ?ModeChangedFn = null,
     progress_report: ?ProgressReportFn = null,
     size_cb: ?SizeFn = null,
     clipboard_write: ?ClipboardWriteFn = null,
@@ -208,6 +209,9 @@ const Effects = struct {
 
     /// C function pointer type for the pwd_changed callback.
     pub const PwdChangedFn = *const fn (Terminal, ?*anyopaque) callconv(lib.calling_conv) void;
+
+    /// C function pointer type for the mode_changed callback.
+    pub const ModeChangedFn = *const fn (Terminal, ?*anyopaque, modes.ModeTag.Backing, bool) callconv(lib.calling_conv) void;
 
     /// C function pointer type for the progress_report callback.
     pub const ProgressReportFn = *const fn (Terminal, ?*anyopaque, *const ProgressReport) callconv(lib.calling_conv) void;
@@ -381,6 +385,17 @@ const Effects = struct {
         func(@ptrCast(wrapper), wrapper.effects.userdata);
     }
 
+    fn modeChangedTrampoline(handler: *Handler, mode: modes.Mode, enabled: bool) void {
+        const wrapper = TerminalWrapper.fromHandler(handler);
+        const func = wrapper.effects.mode_changed orelse return;
+        func(
+            @ptrCast(wrapper),
+            wrapper.effects.userdata,
+            @intFromEnum(mode),
+            enabled,
+        );
+    }
+
     fn progressReportTrampoline(
         handler: *Handler,
         report: osc.Command.ProgressReport,
@@ -441,6 +456,7 @@ fn wrap(
         .xtversion = &Effects.xtversionTrampoline,
         .title_changed = &Effects.titleChangedTrampoline,
         .pwd_changed = &Effects.pwdChangedTrampoline,
+        .mode_changed = &Effects.modeChangedTrampoline,
         .progress_report = &Effects.progressReportTrampoline,
         .size = &Effects.sizeTrampoline,
         .clipboard_write = &Effects.clipboardWriteTrampoline,
@@ -889,6 +905,7 @@ pub const Option = enum(c_int) {
     desktop_notification = 29,
     progress_report = 30,
     continuation_max_bytes = 31,
+    mode_changed = 32,
 
     /// Input type expected for setting the option.
     pub fn InType(comptime self: Option) type {
@@ -903,6 +920,7 @@ pub const Option = enum(c_int) {
             .xtversion => ?Effects.XtversionFn,
             .title_changed => ?Effects.TitleChangedFn,
             .pwd_changed => ?Effects.PwdChangedFn,
+            .mode_changed => ?Effects.ModeChangedFn,
             .progress_report => ?Effects.ProgressReportFn,
             .size_cb => ?Effects.SizeFn,
             .clipboard_write => ?Effects.ClipboardWriteFn,
@@ -967,6 +985,7 @@ fn setTyped(
         .xtversion => wrapper.effects.xtversion = value,
         .title_changed => wrapper.effects.title_changed = value,
         .pwd_changed => wrapper.effects.pwd_changed = value,
+        .mode_changed => wrapper.effects.mode_changed = value,
         .progress_report => wrapper.effects.progress_report = value,
         .size_cb => wrapper.effects.size_cb = value,
         .clipboard_write => wrapper.effects.clipboard_write = value,
@@ -3601,6 +3620,74 @@ test "title_changed without callback is silent" {
 
     // OSC 2 without a callback should not crash
     vt_write(t, "\x1B]2;Hello\x1B\\", 10);
+}
+
+test "set mode_changed callback" {
+    var t: Terminal = null;
+    try testing.expectEqual(Result.success, new(
+        &lib.alloc.test_allocator,
+        &t,
+        80,
+        24,
+    ));
+    defer free(t);
+
+    const S = struct {
+        var count: usize = 0;
+        var modes_seen: [4]modes.ModeTag.Backing = undefined;
+        var enabled_seen: [4]bool = undefined;
+        var observed_seen: [4]bool = undefined;
+        var last_userdata: ?*anyopaque = null;
+
+        fn modeChanged(
+            terminal: Terminal,
+            ud: ?*anyopaque,
+            mode: modes.ModeTag.Backing,
+            enabled: bool,
+        ) callconv(lib.calling_conv) void {
+            modes_seen[count] = mode;
+            enabled_seen[count] = enabled;
+            if (mode_get(terminal, mode, &observed_seen[count]) != .success) {
+                @panic("mode_changed received an invalid mode");
+            }
+            last_userdata = ud;
+            count += 1;
+        }
+    };
+    S.count = 0;
+    S.last_userdata = null;
+
+    var sentinel: u8 = 55;
+    try testing.expectEqual(Result.success, set(t, .userdata, @ptrCast(&sentinel)));
+    try testing.expectEqual(Result.success, set(
+        t,
+        .mode_changed,
+        @ptrCast(&S.modeChanged),
+    ));
+
+    // One write exercises both the ANSI bit and a DEC private mode value.
+    const transitions = "\x1B[4h\x1B[?1004h";
+    vt_write(t, transitions, transitions.len);
+    try testing.expectEqual(@as(usize, 2), S.count);
+    try testing.expectEqual(
+        @as(modes.ModeTag.Backing, @bitCast(modes.ModeTag{ .value = 4, .ansi = true })),
+        S.modes_seen[0],
+    );
+    try testing.expectEqual(
+        @as(modes.ModeTag.Backing, @bitCast(modes.ModeTag{ .value = 1004, .ansi = false })),
+        S.modes_seen[1],
+    );
+    try testing.expect(S.enabled_seen[0]);
+    try testing.expect(S.enabled_seen[1]);
+    try testing.expect(S.observed_seen[0]);
+    try testing.expect(S.observed_seen[1]);
+    try testing.expectEqual(@as(?*anyopaque, @ptrCast(&sentinel)), S.last_userdata);
+
+    // Redundant stream sets and host-initiated mode changes are silent.
+    vt_write(t, "\x1B[?1004h", 8);
+    try testing.expectEqual(@as(usize, 2), S.count);
+    try testing.expectEqual(Result.success, mode_set(t, S.modes_seen[1], false));
+    try testing.expectEqual(@as(usize, 2), S.count);
 }
 
 test "set desktop_notification callback" {

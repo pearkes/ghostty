@@ -89,6 +89,7 @@ extern "C" {
  * | `GHOSTTY_TERMINAL_OPT_BELL`             | `GhosttyTerminalBellFn`           | BEL character (0x07)                      |
  * | `GHOSTTY_TERMINAL_OPT_TITLE_CHANGED`    | `GhosttyTerminalTitleChangedFn`   | Title change via OSC 0 / OSC 2            |
  * | `GHOSTTY_TERMINAL_OPT_PWD_CHANGED`      | `GhosttyTerminalPwdChangedFn`     | Pwd change via OSC 7 / OSC 9 / OSC 1337   |
+ * | `GHOSTTY_TERMINAL_OPT_MODE_CHANGED`     | `GhosttyTerminalModeChangedFn`    | Stream-driven mode transition             |
  * | `GHOSTTY_TERMINAL_OPT_ENQUIRY`          | `GhosttyTerminalEnquiryFn`        | ENQ character (0x05)                      |
  * | `GHOSTTY_TERMINAL_OPT_XTVERSION`        | `GhosttyTerminalXtversionFn`      | XTVERSION query (CSI > q)                 |
  * | `GHOSTTY_TERMINAL_OPT_SIZE`             | `GhosttyTerminalSizeFn`           | XTWINOPS size query (CSI 14/16/18 t)      |
@@ -659,6 +660,29 @@ typedef void (*GhosttyTerminalPwdChangedFn)(GhosttyTerminal terminal,
                                             void* userdata);
 
 /**
+ * Callback function type for mode_changed.
+ *
+ * Called after the terminal applies a stream-driven mode transition from SM,
+ * RM, DECSET, DECRST, or DECRESTORE. The callback only fires when the stored
+ * value actually changes, and mode-specific side effects are complete before
+ * it runs. Host-initiated ghostty_terminal_mode_set() calls do not invoke it.
+ *
+ * DECSAVE does not change live mode state and is silent. Terminal resets do
+ * not synthesize per-mode callbacks.
+ *
+ * @param terminal The terminal handle
+ * @param userdata The userdata pointer set via GHOSTTY_TERMINAL_OPT_USERDATA
+ * @param mode The mode whose stored value changed
+ * @param enabled The new stored value
+ *
+ * @ingroup terminal
+ */
+typedef void (*GhosttyTerminalModeChangedFn)(GhosttyTerminal terminal,
+                                             void* userdata,
+                                             GhosttyMode mode,
+                                             bool enabled);
+
+/**
  * Callback function type for write_pty.
  *
  * Called when the terminal needs to write data back to the pty, for
@@ -1048,6 +1072,14 @@ typedef enum GHOSTTY_ENUM_TYPED {
    * Input type: size_t*
    */
   GHOSTTY_TERMINAL_OPT_CONTINUATION_MAX_BYTES = 31,
+
+  /**
+   * Callback invoked after a stream-driven terminal mode transition. Set to
+   * NULL to ignore mode changes. See GhosttyTerminalModeChangedFn.
+   *
+   * Input type: GhosttyTerminalModeChangedFn
+   */
+  GHOSTTY_TERMINAL_OPT_MODE_CHANGED = 32,
   GHOSTTY_TERMINAL_OPT_MAX_VALUE = GHOSTTY_ENUM_MAX_VALUE,
 } GhosttyTerminalOption;
 

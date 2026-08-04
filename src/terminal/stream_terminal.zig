@@ -110,6 +110,11 @@ pub const Handler = struct {
         /// handler.terminal.getPwd().
         pwd_changed: ?*const fn (*Handler) void,
 
+        /// Called after a stream-driven mode transition and all of its
+        /// mode-specific side effects have completed. Redundant sets and
+        /// resets do not invoke this callback.
+        mode_changed: ?*const fn (*Handler, modes.Mode, bool) void,
+
         /// Called when the running program reports progress via OSC 9;4.
         progress_report: ?*const fn (*Handler, osc.Command.ProgressReport) void,
 
@@ -147,6 +152,7 @@ pub const Handler = struct {
             .size = null,
             .title_changed = null,
             .pwd_changed = null,
+            .mode_changed = null,
             .write_pty = null,
             .xtversion = null,
         };
@@ -266,8 +272,9 @@ pub const Handler = struct {
             .reset_mode => try self.setMode(value.mode, false),
             .save_mode => self.terminal.modes.save(value.mode),
             .restore_mode => {
+                const previous = self.terminal.modes.get(value.mode);
                 const v = self.terminal.modes.restore(value.mode);
-                try self.setMode(value.mode, v);
+                try self.applyMode(value.mode, v, previous);
             },
             .top_and_bottom_margin => self.terminal.setTopAndBottomMargin(value.top_left, value.bottom_right),
             .left_and_right_margin => self.terminal.setLeftAndRightMargin(value.top_left, value.bottom_right),
@@ -682,9 +689,15 @@ pub const Handler = struct {
     }
 
     fn setMode(self: *Handler, mode: modes.Mode, enabled: bool) !void {
+        const previous = self.terminal.modes.get(mode);
+
         // Set the mode on the terminal
         self.terminal.modes.set(mode, enabled);
 
+        try self.applyMode(mode, enabled, previous);
+    }
+
+    fn applyMode(self: *Handler, mode: modes.Mode, enabled: bool, previous: bool) !void {
         // Some modes require additional processing
         switch (mode) {
             .autorepeat,
@@ -758,6 +771,11 @@ pub const Handler = struct {
             .mouse_format_sgr_pixels => self.terminal.flags.mouse_format = if (enabled) .sgr_pixels else .x10,
 
             else => {},
+        }
+
+        if (previous != enabled) {
+            const func = self.effects.mode_changed orelse return;
+            func(self, mode, enabled);
         }
     }
 
@@ -2386,6 +2404,85 @@ test "request mode DECRQM with write_pty callback" {
         s.nextSlice("\x1B[?9999$p");
         try testing.expectEqualStrings("\x1B[?9999;0$y", S.last_response.?);
     }
+}
+
+test "mode_changed effect reports stream-driven transitions in order" {
+    var t: Terminal = try .init(testing.io, testing.allocator, .{ .cols = 80, .rows = 24 });
+    defer t.deinit(testing.allocator);
+
+    const S = struct {
+        var mode_count: usize = 0;
+        var last_mode: modes.Mode = .focus_event;
+        var last_enabled: bool = false;
+        var observed_enabled: bool = false;
+        var order: [8]u8 = undefined;
+        var order_count: usize = 0;
+
+        fn appendOrder(value: u8) void {
+            order[order_count] = value;
+            order_count += 1;
+        }
+
+        fn modeChanged(handler: *Handler, mode: modes.Mode, enabled: bool) void {
+            mode_count += 1;
+            last_mode = mode;
+            last_enabled = enabled;
+            observed_enabled = handler.terminal.modes.get(mode);
+            appendOrder(if (enabled) 'M' else 'm');
+        }
+
+        fn bell(_: *Handler) void {
+            appendOrder('B');
+        }
+
+        fn titleChanged(_: *Handler) void {
+            appendOrder('T');
+        }
+    };
+    S.mode_count = 0;
+    S.order_count = 0;
+
+    var handler: Handler = .init(&t);
+    handler.effects.mode_changed = &S.modeChanged;
+    handler.effects.bell = &S.bell;
+    handler.effects.title_changed = &S.titleChanged;
+
+    var s: Stream = .init(.{ .allocator = testing.allocator, .handler = handler });
+    defer s.deinit();
+
+    // DECSET reports the new value after it has reached terminal state.
+    s.nextSlice("\x1b[?1004h");
+    try testing.expectEqual(@as(usize, 1), S.mode_count);
+    try testing.expectEqual(modes.Mode.focus_event, S.last_mode);
+    try testing.expect(S.last_enabled);
+    try testing.expect(S.observed_enabled);
+
+    // Setting the already-enabled mode is not a transition.
+    s.nextSlice("\x1b[?1004h");
+    try testing.expectEqual(@as(usize, 1), S.mode_count);
+
+    // DECRST reports the transition back to reset.
+    s.nextSlice("\x1b[?1004l");
+    try testing.expectEqual(@as(usize, 2), S.mode_count);
+    try testing.expect(!S.last_enabled);
+    try testing.expect(!S.observed_enabled);
+
+    // Saving is silent. Restoring reports only when the saved value differs
+    // from the current value.
+    s.nextSlice("\x1b[?1004s");
+    try testing.expectEqual(@as(usize, 2), S.mode_count);
+    s.nextSlice("\x1b[?1004h");
+    try testing.expectEqual(@as(usize, 3), S.mode_count);
+    s.nextSlice("\x1b[?1004r");
+    try testing.expectEqual(@as(usize, 4), S.mode_count);
+    try testing.expect(!S.last_enabled);
+    s.nextSlice("\x1b[?1004r");
+    try testing.expectEqual(@as(usize, 4), S.mode_count);
+
+    // Effects from a single input batch remain in parser order.
+    S.order_count = 0;
+    s.nextSlice("\x1b[?1004h\x07\x1b]2;mode order\x1b\\\x1b[?1004l");
+    try testing.expectEqualStrings("MBTm", S.order[0..S.order_count]);
 }
 
 test "stream: CSI W with intermediate but no params" {
