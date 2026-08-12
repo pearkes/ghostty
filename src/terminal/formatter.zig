@@ -460,6 +460,9 @@ pub const TerminalFormatter = struct {
                 }
             }
 
+            // Screen contents are formatted relative to the top-left.
+            try writer.writeAll("\x1b[H");
+
             // If we have a pin_map, add the bytes we wrote to map.
             if (self.pin_map) |*m| {
                 var discarding: std.Io.Writer.Discarding = .init(&.{});
@@ -5657,6 +5660,83 @@ test "Terminal vt with tabstops" {
     try testing.expectEqual(t.screens.active.cursor.y, t2.screens.active.cursor.y);
 
     // Verify the reordered terminal state is still represented in the map.
+    try testing.expectEqual(output.len, pin_map.count());
+}
+
+test "Terminal vt with tabstops preserves content position" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    const io = testing.io;
+    const cols = 213;
+
+    var builder: std.Io.Writer.Allocating = .init(alloc);
+    defer builder.deinit();
+
+    var t = try Terminal.init(io, alloc, .{
+        .cols = cols,
+        .rows = 24,
+    });
+    defer t.deinit(alloc);
+
+    var s = t.vtStream();
+    defer s.deinit();
+
+    // Clear all tabs and set custom tabstops
+    s.nextSlice("\x1b[3g"); // Clear all tabs
+    s.nextSlice("\x1b[5G\x1bH"); // Set tab at column 5
+    s.nextSlice("\x1b[15G\x1bH"); // Set tab at column 15
+    s.nextSlice("\x1b[209G\x1bH"); // Set tab at column 209
+    s.nextSlice("\x1b[Hhello\x1b[1;5H");
+
+    var pin_map: PinMap.Map = .empty;
+    defer pin_map.deinit(alloc);
+
+    var formatter: TerminalFormatter = .init(&t, .vt);
+    formatter.extra.tabstops = true;
+    formatter.extra.screen.cursor = true;
+    formatter.pin_map = .{ .alloc = alloc, .map = &pin_map };
+
+    try formatter.format(&builder.writer);
+    const output = builder.writer.buffered();
+
+    // Create a second terminal and apply the output
+    var t2 = try Terminal.init(io, alloc, .{
+        .cols = cols,
+        .rows = 24,
+    });
+    defer t2.deinit(alloc);
+
+    var s2 = t2.vtStream();
+    defer s2.deinit();
+
+    s2.nextSlice(output);
+
+    // Verify tabstops match (columns are 0-indexed in the API)
+    for (0..cols) |col| {
+        try testing.expectEqual(t.tabstops.get(col), t2.tabstops.get(col));
+    }
+
+    // Verify content matches at its original position
+    for ("hello", 0..) |expected, col| {
+        const cell = t2.screens.active.pages.getCell(.{
+            .screen = .{ .x = @intCast(col), .y = 0 },
+        }).?;
+        try testing.expectEqual(expected, cell.cell.codepoint());
+    }
+
+    // Verify content was not written at the final tabstop
+    for (208..cols) |col| {
+        const cell = t2.screens.active.pages.getCell(.{
+            .screen = .{ .x = @intCast(col), .y = 0 },
+        }).?;
+        try testing.expect(cell.cell.isEmpty());
+    }
+
+    // Verify cursor position matches
+    try testing.expectEqual(t.screens.active.cursor.x, t2.screens.active.cursor.x);
+    try testing.expectEqual(t.screens.active.cursor.y, t2.screens.active.cursor.y);
+
+    // Verify pin map
     try testing.expectEqual(output.len, pin_map.count());
 }
 
