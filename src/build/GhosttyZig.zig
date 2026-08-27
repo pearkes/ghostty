@@ -14,6 +14,11 @@ vt_c: *std.Build.Module,
 /// The libghostty-vt version
 version: std.SemanticVersion,
 
+/// Effective Kitty graphics feature state for this libghostty-vt build.
+/// Artifact builders use this for resources such as the WASM stack that are
+/// configured outside the terminal module itself.
+kitty_graphics: bool,
+
 /// Static library paths for vendored SIMD dependencies. Populated
 /// only when the dependencies are built from source (not provided
 /// by the system via -Dsystem-integration). Used to produce a
@@ -97,6 +102,7 @@ fn initInner(
         ),
 
         .version = cfg.lib_version,
+        .kitty_graphics = vt_options.kittyGraphics(),
 
         .simd_libs = simd_libs,
     };
@@ -142,7 +148,7 @@ fn initVt(
     // its C code is compiled whenever the module is in the build
     // graph regardless of analysis, so only wire it in when Kitty
     // graphics is actually enabled.
-    if (vt_options.kittyGraphics(cfg.target.result)) {
+    if (vt_options.kittyGraphics()) {
         if (b.lazyDependency("wuffs", .{
             .target = cfg.target,
             .optimize = cfg.optimize,

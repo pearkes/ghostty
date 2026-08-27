@@ -15,10 +15,14 @@ const build_options = @import("terminal_options");
 /// Decode PNG data into RGBA pixels. If null, PNG decoding is unsupported
 /// and the exact semantics are up to callers. For example, the Kitty Graphics
 /// Protocol will work but cannot accept PNG images.
-pub var decode_png: ?DecodePngFn = png: {
-    if (build_options.artifact == .lib) break :png null;
-    break :png &decodePngWuffs;
-};
+///
+/// Library artifacts remain dependency-injected by default. Embedders may
+/// install a runtime callback or opt into Ghostty's bundled Wuffs decoder at
+/// build time; either choice can still be replaced through this sys hook.
+pub var decode_png: ?DecodePngFn = if (build_options.builtin_png_decoder)
+    &decodePngWuffs
+else
+    null;
 
 pub const DecodeError = Allocator.Error || error{InvalidData};
 pub const DecodePngFn = *const fn (Allocator, []const u8) DecodeError!Image;

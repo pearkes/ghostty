@@ -39,6 +39,11 @@ pub const Options = struct {
     /// Optional feature gates, all enabled by default. See Features.
     features: Features = .{},
 
+    /// Initialize the PNG sys hook with the bundled Wuffs decoder. The
+    /// Ghostty application enables this; lib artifacts opt in at build time
+    /// or install their own decoder through the runtime sys API.
+    builtin_png_decoder: bool,
+
     /// The version of the application.
     version: std.SemanticVersion,
 
@@ -148,9 +153,9 @@ pub const Options = struct {
         /// renderer uses to draw placed images. Disabled sequences are
         /// still consumed and safely ignored.
         ///
-        /// This requires the ability to get timestamps from the OS, so
-        /// it is always disabled on freestanding targets (e.g.
-        /// wasm32-freestanding) regardless of this setting.
+        /// Freestanding targets support direct transmissions. File,
+        /// temporary-file, and shared-memory media are rejected because those
+        /// targets have no corresponding OS namespaces.
         ///
         /// C API: `ghostty_kitty_graphics_*`.
         kitty_graphics: bool = true,
@@ -257,15 +262,16 @@ pub const Options = struct {
         }
     };
 
-    /// Whether the Kitty graphics feature is effectively enabled for
-    /// the given target. Kitty graphics requires the ability to get
-    /// timestamps and there is no way to do that on freestanding
-    /// targets, so it is always disabled there regardless of the
-    /// feature setting.
-    pub fn kittyGraphics(self: Options, target: std.Target) bool {
-        if (target.cpu.arch == .wasm32 and target.os.tag == .freestanding)
-            return false;
+    /// Whether the Kitty graphics feature is included in this artifact.
+    pub fn kittyGraphics(self: Options) bool {
         return self.features.kitty_graphics;
+    }
+
+    /// Whether this artifact starts with the bundled PNG decoder installed.
+    /// No terminal code can consume it when Kitty graphics is compiled out,
+    /// so suppress it as well to keep the Wuffs module out of the build graph.
+    pub fn builtinPngDecoder(self: Options) bool {
+        return self.kittyGraphics() and self.builtin_png_decoder;
     }
 
     /// Add the required build options for the terminal module.
@@ -283,19 +289,17 @@ pub const Options = struct {
         opts.addOption(bool, "oniguruma", self.oniguruma);
         opts.addOption(bool, "simd", self.simd);
         opts.addOption(bool, "slow_runtime_safety", self.slow_runtime_safety);
+        opts.addOption(bool, "builtin_png_decoder", self.builtinPngDecoder());
 
         // These are synthesized based on other options.
         opts.addOption(bool, "tmux_control_mode", self.oniguruma);
 
         // Feature gates, emitted as flat bools (e.g. `options.snapshot`).
-        const target = m.resolved_target.?.result;
         inline for (@typeInfo(Features).@"struct".fields) |field| {
             var value = @field(self.features, field.name);
 
-            // Kitty graphics is force-disabled on some targets; see
-            // kittyGraphics for details.
             if (comptime std.mem.eql(u8, field.name, "kitty_graphics")) {
-                value = self.kittyGraphics(target);
+                value = self.kittyGraphics();
             }
 
             opts.addOption(bool, field.name, value);
@@ -322,4 +326,21 @@ pub const Options = struct {
 
 test {
     _ = Options.Features;
+}
+
+test "builtin PNG decoder requires Kitty graphics" {
+    const testing = std.testing;
+    var options: Options = .{
+        .artifact = .lib,
+        .oniguruma = false,
+        .simd = false,
+        .slow_runtime_safety = false,
+        .c_abi = true,
+        .builtin_png_decoder = true,
+        .version = .{ .major = 0, .minor = 0, .patch = 0 },
+    };
+
+    try testing.expect(options.builtinPngDecoder());
+    options.features.kitty_graphics = false;
+    try testing.expect(!options.builtinPngDecoder());
 }

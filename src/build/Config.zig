@@ -66,6 +66,11 @@ emit_unicode_table_gen: bool = false,
 /// Ghostty application ignores this and always enables everything.
 vt_features: TerminalBuildOptions.Features = .{},
 
+/// Initialize libghostty-vt's PNG decoder with Ghostty's bundled Wuffs
+/// implementation. Library builds default to dependency injection through
+/// the sys API so embedders only pay for decoding when they opt in.
+vt_builtin_png_decoder: bool = false,
+
 /// True when Ghostty is being built as a dependency of another project
 /// rather than as the root project.
 is_dep: bool = false,
@@ -449,6 +454,13 @@ pub fn init(b: *std.Build, appVersion: []const u8, libVersion: []const u8) !Conf
         };
     };
 
+    config.vt_builtin_png_decoder = b.option(
+        bool,
+        "vt-builtin-png-decoder",
+        "Initialize libghostty-vt's PNG decoder with bundled Wuffs. " ++
+            "Ignored when the Kitty graphics feature is disabled.",
+    ) orelse false;
+
     config.emit_exe = b.option(
         bool,
         "emit-exe",
@@ -717,6 +729,12 @@ pub fn terminalOptions(
         .features = switch (artifact) {
             .ghostty => .{},
             .lib => self.vt_features,
+        },
+        // The application has always used Wuffs. Libraries preserve their
+        // dependency-injected default unless the embedder explicitly opts in.
+        .builtin_png_decoder = switch (artifact) {
+            .ghostty => true,
+            .lib => self.vt_builtin_png_decoder,
         },
         .version = switch (artifact) {
             .ghostty => self.version,

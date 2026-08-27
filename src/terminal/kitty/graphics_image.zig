@@ -150,6 +150,13 @@ pub const LoadingImage = struct {
             return result;
         }
 
+        // Freestanding targets have no filesystem or shared-memory namespace.
+        // This comptime branch also keeps the unavailable std.fs and std.posix
+        // implementations for those media out of the build graph entirely.
+        if (comptime builtin.os.tag == .freestanding) {
+            return error.UnsupportedMedium;
+        }
+
         // Verify our capabilities and limits allow this.
         {
             // Special case if we don't support decoding PNGs and the format

@@ -58,11 +58,11 @@ pub fn initWasm(
     // There is no entrypoint for this wasm module.
     exe.entry = .disabled;
 
-    // Default Zig stack size in Zig 0.16 is 1MB. Lower to 128 KB since
-    // this has to be preallocated up front in Wasm linear memory. Peak
-    // stack under various artificial loads is 17 KB at the time of this
-    // comment but lets do 128KB to be safe. We can lower later.
-    exe.stack_size = 128 * 1024;
+    // WASM stack memory is reserved in linear memory up front. Ordinary VT
+    // workloads fit comfortably in 128 KB, but Kitty image ingestion has two
+    // nested ~69 KB frames plus dispatch overhead in ReleaseSmall. Keep the
+    // larger reservation scoped to artifacts that actually include Kitty.
+    exe.stack_size = if (zig.kitty_graphics) 256 * 1024 else 128 * 1024;
 
     // Zig's WASM linker doesn't support --growable-table, so the table
     // is emitted with max == min and can't be grown from JS. Run a
